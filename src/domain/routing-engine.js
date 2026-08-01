@@ -56,17 +56,34 @@ export function haversineKm(from, to) {
   return EARTH_RADIUS_KM * angularDistance;
 }
 
-/** Business rule supplied in the expert-system documentation. */
+/** Business rule supplied in the expert-system documentation.
+ *  City limits are now admin-defined as dynamic (days -> cities) pairs in
+ *  `rules.cityLimits`. For a given trip length we use the smallest tier whose
+ *  `days` is >= the trip days; if the trip is longer than every tier, we use
+ *  the largest tier. Falls back to the legacy maxCitiesN Days fields when no
+ *  dynamic pairs are present, so older saved settings keep working. */
 export function maxCitiesForDays(days, rules) {
   if (!rules) throw new Error("Expert System Rules are missing for city limits.");
   const tripDays = positiveInteger(days, "days");
-  
+
+  const limits = Array.isArray(rules.cityLimits)
+    ? rules.cityLimits
+        .map((p) => ({ days: Number(p.days), cities: Number(p.cities) }))
+        .filter((p) => Number.isFinite(p.days) && p.days > 0 && Number.isFinite(p.cities) && p.cities >= 0)
+        .sort((a, b) => a.days - b.days)
+    : [];
+
+  if (limits.length) {
+    const match = limits.find((p) => tripDays <= p.days);
+    return (match || limits[limits.length - 1]).cities;
+  }
+
+  // Legacy fallback (fixed 3/5/7/10 tiers).
   const getLimit = (key) => {
     const val = Number(rules[key]);
     if (!Number.isFinite(val)) throw new Error(`Missing Expert System Rule: ${key}`);
     return val;
   };
-
   if (tripDays <= 3) return getLimit('maxCities3Days');
   if (tripDays <= 5) return getLimit('maxCities5Days');
   if (tripDays <= 7) return getLimit('maxCities7Days');
