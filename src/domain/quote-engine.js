@@ -63,20 +63,31 @@ function destinationOutput(destination) {
   };
 }
 
+/* Real international airports — the journey should physically start and end
+   here, not at the nearest city. Admins can override coords per hub later. */
+const AIRPORT_HUBS = Object.freeze({
+  colombo: { id: "cmb-airport", title: "Colombo Airport (CMB)", name: "Colombo Airport (CMB)", latitude: 7.1808, longitude: 79.8841, isAirport: true },
+  cmb:     { id: "cmb-airport", title: "Colombo Airport (CMB)", name: "Colombo Airport (CMB)", latitude: 7.1808, longitude: 79.8841, isAirport: true },
+  mattala: { id: "hri-airport", title: "Mattala Airport (HRI)", name: "Mattala Airport (HRI)", latitude: 6.2841, longitude: 81.1240, isAirport: true },
+  hri:     { id: "hri-airport", title: "Mattala Airport (HRI)", name: "Mattala Airport (HRI)", latitude: 6.2841, longitude: 81.1240, isAirport: true },
+});
+
 function buildSelection(facts, destinations, rules = {}) {
   const getDestination = (id) => destinations.find((d) => d.id === id);
   const getByAirport = (code) => destinations.find((d) => d.airportCode === code || d.id === code || (d.title && d.title.toLowerCase() === code) || (d.name && d.name.toLowerCase() === code)) || getDestination(code);
-  
+
   const arrivalId = facts.arrivalHubId?.toLowerCase();
   const departureId = facts.departureHubId?.toLowerCase();
-  
-  let arrival = getByAirport(arrivalId);
-  let departure = getByAirport(departureId);
-  
-  // Fallback gracefully if hubs aren't in expertCities
-  if (!arrival) arrival = destinations[0];
-  if (!departure) departure = destinations[0];
-  
+
+  // Prefer a real airport hub (starts/ends the trip at the airport). Fall back
+  // to a matching expert city, then to the first available destination.
+  let arrival = AIRPORT_HUBS[arrivalId] || getByAirport(arrivalId);
+  let departure = AIRPORT_HUBS[departureId] || getByAirport(departureId);
+
+  // Fallback gracefully if hubs aren't recognised at all
+  if (!arrival) arrival = AIRPORT_HUBS.colombo;
+  if (!departure) departure = AIRPORT_HUBS.colombo;
+
   if (!arrival || !departure) throw new RangeError("No expert cities available.");
 
   const defaultInterestsRaw = rules.defaultInterests || "nature, culture, beach";
@@ -101,38 +112,40 @@ function buildSelection(facts, destinations, rules = {}) {
     preferredNames = facts.excursionNames;
   }
   
-  // Ensure destinations array has `name` mapped to `title` for NearestNeighbour logic
-  const normalizedDestinations = destinations.map(d => ({ ...d, name: d.title || d.name, latitude: d.lat || d.latitude, longitude: d.lng || d.longitude }));
-  
+  // Ensure destinations array has `name` mapped to `title` for NearestNeighbour logic.
+  // Airport hubs are injected so the nearest-neighbour route can start from the airport.
+  const arrivalNorm = { ...arrival, name: arrival.title || arrival.name, latitude: arrival.latitude ?? arrival.lat, longitude: arrival.longitude ?? arrival.lng };
+  const departureNorm = { ...departure, name: departure.title || departure.name, latitude: departure.latitude ?? departure.lat, longitude: departure.longitude ?? departure.lng };
+  const normalizedDestinations = [
+    arrivalNorm,
+    ...destinations.map(d => ({ ...d, name: d.title || d.name, latitude: d.lat || d.latitude, longitude: d.lng || d.longitude })),
+  ];
+  // add departure hub too if different from arrival
+  if (departureNorm.id !== arrivalNorm.id) normalizedDestinations.push(departureNorm);
+
   const nearest = buildNearestNeighbourRoute({
     destinations: normalizedDestinations,
     preferredNames,
-    startName: arrival.title || arrival.name,
+    startName: arrivalNorm.name,
     days: facts.days,
     rules: rules || {},
     maxKmPerDay: Number(rules.maxKmPerDay) || 300,
   });
-  
+
   const selected = nearest.route.map(({ name }) => normalizedDestinations.find((d) => d.name === name));
   const stops = selected.filter(Boolean);
-  if (stops.length > 0 && stops[stops.length - 1].id !== departure.id) {
-    stops.push(normalizedDestinations.find(d => d.id === departure.id));
-  } else if (stops.length === 0) {
-    stops.push(arrival, departure);
+
+  // Guarantee the journey begins at the arrival airport.
+  if (stops.length === 0 || stops[0].id !== arrivalNorm.id) {
+    stops.unshift(arrivalNorm);
   }
-  // A route needs at least two points. When the traveller picks a single city
-  // (e.g. a 3-night, 1-city trip) the nearest-neighbour route can collapse to a
-  // single stop. Guarantee an origin AND destination so calculateRoute() never
-  // fails with "at least an origin and destination are required".
-  if (stops.length === 1) {
-    const only = stops[0];
-    const end = (departure && departure.id !== only.id)
-      ? normalizedDestinations.find(d => d.id === departure.id)
-      : (arrival && arrival.id !== only.id
-          ? normalizedDestinations.find(d => d.id === arrival.id)
-          : only);
-    stops.push(end || only);   // duplicate the single stop as a last resort (distance 0)
+  // Guarantee the journey ends at the departure airport.
+  if (stops[stops.length - 1].id !== departureNorm.id) {
+    stops.push(departureNorm);
   }
+  // A route needs at least two distinct points; unshift+push above guarantees this
+  // even for a single-city trip (Airport → City → Airport).
+
   return { arrival, departure, stops, candidates, unvisitedNames: nearest.unvisitedNames };
 }
 
@@ -222,19 +235,19 @@ export function buildQuotePreview({ tripFacts, route, destinations, rules }) {
       encodedPolyline: route.encodedPolyline ?? null,
       stops: selection.stops.map(destinationOutput),
     },
-    itinerary: selection.stops.map((destination, index) => ({
-      day: Math.min(index + 1, facts.days),
-      destinationId: destination.id,
-      title: destination.title || destination.name,
-      durationMinutes: destination.durationMinutes || 0,
-      highlights: destination.activities || [],
-    })),
+    itinerary: selection.stops
+      // Airports appear on the map/route but are not "day" destinations.
+      .filter((destination) => !destination.isAirport)
+      .map((destination, index) => ({
+        day: Math.min(index + 1, facts.days),
+        destinationId: destination.id,
+        title: destination.title || destination.name,
+        durationMinutes: destination.durationMinutes || 0,
+        highlights: destination.activities || [],
+      })),
     lineItems: quote.lineItems.map(({ id, label, totalMinor }) => ({ id, label, totalMinor })),
     warnings: [
       route.bookable === false ? "Using straight-line estimation fallback. Live routing may be unavailable." : "",
-      "DEBUG: excursionIds = " + JSON.stringify(facts.excursionIds),
-      "DEBUG: preferredNames = " + JSON.stringify(facts.excursionNames),
-      "DEBUG: topPreferred = " + JSON.stringify(selection.stops.map(d => d.title || d.name))
     ].filter(Boolean),
     unvisitedDestinationNames: selection.unvisitedNames,
   };
