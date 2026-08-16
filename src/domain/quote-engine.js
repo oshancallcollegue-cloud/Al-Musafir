@@ -120,6 +120,19 @@ function buildSelection(facts, destinations, rules = {}) {
   } else if (stops.length === 0) {
     stops.push(arrival, departure);
   }
+  // A route needs at least two points. When the traveller picks a single city
+  // (e.g. a 3-night, 1-city trip) the nearest-neighbour route can collapse to a
+  // single stop. Guarantee an origin AND destination so calculateRoute() never
+  // fails with "at least an origin and destination are required".
+  if (stops.length === 1) {
+    const only = stops[0];
+    const end = (departure && departure.id !== only.id)
+      ? normalizedDestinations.find(d => d.id === departure.id)
+      : (arrival && arrival.id !== only.id
+          ? normalizedDestinations.find(d => d.id === arrival.id)
+          : only);
+    stops.push(end || only);   // duplicate the single stop as a last resort (distance 0)
+  }
   return { arrival, departure, stops, candidates, unvisitedNames: nearest.unvisitedNames };
 }
 
